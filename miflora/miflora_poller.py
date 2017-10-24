@@ -7,6 +7,7 @@ No other operating systems are supported at the moment
 """
 import logging
 import time
+import struct
 import threading
 from datetime import datetime
 from bluepy.btle import Peripheral, BTLEException, ADDR_TYPE_PUBLIC
@@ -41,7 +42,7 @@ cmd_history_read_failed = b'\xa3\x00\x00'
 
 
 def cmd_history_address(addr):
-    return b'\xa1' + addr.to_bytes(2, BYTEORDER)
+    return b'\xa1' + struct.pack("<H", addr)
 
 
 class MiFlowerCareException(Exception):
@@ -150,7 +151,7 @@ class MiFloraPoller:
         ts = (time.time() + start) / 2
 
         return {
-            MI_DEVICE_TIME: int.from_bytes(response, BYTEORDER),
+            MI_DEVICE_TIME: struct.unpack('<I', response)[0],
             MI_WALL_TIME: ts
         }
 
@@ -172,7 +173,9 @@ class MiFloraPoller:
 
         timestamps = self._fetch_device_time()
         timestamps[MI_WALL_TIME] = datetime.fromtimestamp(timestamps[MI_WALL_TIME])
-        return {**timestamps, **self._decode_measurement(response)}
+        output = timestamps.copy()
+        output.update(self._decode_measurement(response))
+        return output
 
     @auto_connect
     def _fetch_history(self):
@@ -180,7 +183,7 @@ class MiFloraPoller:
         self.write(handle_history_control, cmd_history_read_init, withResponse=True)
         history_info = self.read(handle_history_read)
 
-        history_length = int.from_bytes(history_info[0:2], BYTEORDER)
+        history_length = struct.unpack("<H", history_info[0:2])[0]
         if history_length > 0:
             LOGGER.info("Getting %d measurements" % history_length)
             data = []
@@ -189,7 +192,7 @@ class MiFloraPoller:
                 try:
                     self.write(handle_history_control, payload, withResponse=True)
                     response = self.read(handle_history_read)
-                    if response != (0).to_bytes(16, BYTEORDER):  # Not invalid
+                    if response != "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00":
                         LOGGER.debug("History item retrieved")
                         data.append(self._decode_history(response))
                 except BTLEException:
@@ -209,7 +212,7 @@ class MiFloraPoller:
     def _decode_device_info(self, byte_array):
         """Perform byte magic when decoding the device info."""
         data = {
-            MI_BATTERY: int.from_bytes(byte_array[0:1], BYTEORDER),
+            MI_BATTERY: struct.unpack("<B", byte_array[0:1])[0],
             MI_FIRMWARE: byte_array[2:7].decode('ascii')
         }
         LOGGER.debug('Raw data for char 0x38: %s', self._format_bytes(byte_array))
@@ -221,14 +224,14 @@ class MiFloraPoller:
         """Perform byte magic when decoding measurements."""
         # negative numbers are stored in one's complement
         temp_bytes = byte_array[0:2]
-        if temp_bytes[1] & 0x80 > 0:
+        if ord(temp_bytes[1]) & 0x80 > 0:
             temp_bytes = [temp_bytes[0] ^ 0xFF, temp_bytes[1] ^ 0xFF]
 
         data = {
-            MI_TEMPERATURE: int.from_bytes(temp_bytes, BYTEORDER)/10.0,
-            MI_LIGHT: int.from_bytes(byte_array[3:5], BYTEORDER),
-            MI_MOISTURE: int.from_bytes(byte_array[7:8], BYTEORDER),
-            MI_CONDUCTIVITY: int.from_bytes(byte_array[8:10], BYTEORDER)
+            MI_TEMPERATURE: struct.unpack("<h", temp_bytes)[0]/10.0,
+            MI_LIGHT: struct.unpack("<H", byte_array[3:5])[0],
+            MI_MOISTURE: struct.unpack("<B", byte_array[7:8])[0],
+            MI_CONDUCTIVITY: struct.unpack("<H", byte_array[8:10])[0]
         }
         LOGGER.debug('Raw data for char 0x35: %s', self._format_bytes(byte_array))
         LOGGER.debug('temp: %f', data[MI_TEMPERATURE])
@@ -241,15 +244,15 @@ class MiFloraPoller:
         """Perform byte magic when decoding history data."""
         # negative numbers are stored in one's complement
         temp_bytes = byte_array[4:6]
-        if temp_bytes[1] & 0x80 > 0:
+        if ord(temp_bytes[1]) & 0x80 > 0:
             temp_bytes = [temp_bytes[0] ^ 0xFF, temp_bytes[1] ^ 0xFF]
 
         data = {
-            MI_DEVICE_TIME: int.from_bytes(byte_array[:4], BYTEORDER),
-            MI_TEMPERATURE: int.from_bytes(temp_bytes, BYTEORDER)/10.0,
-            MI_LIGHT: int.from_bytes(byte_array[7:10], BYTEORDER),
+            MI_DEVICE_TIME: struct.unpack("<I", byte_array[:4])[0],
+            MI_TEMPERATURE: struct.unpack("<h", temp_bytes)[0]/10.0,
+            MI_LIGHT: struct.unpack("<I", byte_array[7:11])[0],
             MI_MOISTURE: byte_array[11],
-            MI_CONDUCTIVITY: int.from_bytes(byte_array[12:14], BYTEORDER)
+            MI_CONDUCTIVITY: struct.unpack("<H", byte_array[12:14])[0]
         }
         LOGGER.debug('Raw data for char 0x3c: %s', self._format_bytes(byte_array))
         LOGGER.debug('device time: %d', data[MI_DEVICE_TIME])
@@ -268,7 +271,7 @@ class MiFloraPoller:
         """Connect self._peripheral to the device."""
         self._peripheral.connect(self._mac, ADDR_TYPE_PUBLIC, iface=self._iface)
 
-    def reconnect_on_disconnect(self, exception: BTLEException):
+    def reconnect_on_disconnect(self, exception):
         """Callback for reconnecting after an untimely disconnect
         (the device stops the connection after approximately 3 sec)."""
         assert type(exception) is BTLEException
@@ -288,4 +291,4 @@ class MiFloraPoller:
     @staticmethod
     def _format_bytes(raw_data):
         """Prettyprint a byte array."""
-        return ' '.join([format(c, "02x") for c in raw_data])
+        return ' '.join('{:02x}'.format(ord(c)) for c in raw_data)

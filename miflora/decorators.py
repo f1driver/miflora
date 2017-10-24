@@ -53,22 +53,17 @@ def cached_ttl(ttl):
     :return:
     """
     def _decorator(func):
-        cache = None
-        timestamp = 0
-        function_args = None
+        d = {'cache': None, 'timestamp': 0, 'function_args': None}
 
         def _wrapper(*args, **kwargs):
-            nonlocal timestamp
-            nonlocal function_args
-            nonlocal cache
             now = time.time()
-            if cache is not None and (now - timestamp) < ttl and function_args == (args, kwargs):
+            if d['cache'] is not None and (now - d['timestamp']) < ttl and d['function_args'] == (args, kwargs):
                 LOGGER.debug("Cache returned for %s" % func)
-                return cache
+                return d['cache']
             else:
-                timestamp = now
-                function_args = (args, kwargs)
-                cache = func(*args, **kwargs)
-                return cache
+                d['timestamp'] = now
+                d['function_args'] = (args, kwargs)
+                d['cache'] = func(*args, **kwargs)
+                return d['cache']
         return _wrapper
     return _decorator
